@@ -16,6 +16,8 @@
 //
 //////////////////////////////////////////////////////////////////////////////////////
 
+//Updated by @rajaraodv
+
 (function (root, factory) {
     if (typeof define === 'function' && define.amd) {
         define(['forcetk'], factory);
@@ -37,10 +39,10 @@
      * @param callbackURL string Callback URL from Setup | Develop | Remote Access
      * @param successCallback function Function that will be called on successful login, it accepts single argument with forcetk.Client instance
      * @param errorCallback function Function that will be called when login process fails, it accepts single argument with error object
-     *
+     * @param proxyUrl  A Proxy url for Heroku apps like Node.js/PHP apps.
      * @constructor
      */
-    forcetk.ClientUI = function (loginURL, consumerKey, callbackURL, successCallback, errorCallback) {
+    forcetk.ClientUI = function (loginURL, consumerKey, callbackURL, successCallback, errorCallback, proxyUrl) {
 
         if (typeof loginURL !== 'string') throw new TypeError('loginURL should be of type String');
         this.loginURL = loginURL;
@@ -58,17 +60,15 @@
             throw new TypeError('errorCallback should of type Function');
         this.errorCallback = errorCallback;
 
-        // Creating forcetk.Client instance
-        this.client = new forcetk.Client(consumerKey, loginURL);
-
-    }
+        this.client = new forcetk.Client(consumerKey, loginURL, proxyUrl);
+  };
 
     forcetk.ClientUI.prototype = {
 
         /**
          * Starts OAuth login process.
          */
-        login:function login() {
+        login: function login() {
 
             var refreshToken = localStorage.getItem('ftkui_refresh_token');
 
@@ -80,7 +80,7 @@
 
                         if (that.successCallback) {
                             that.client.setSessionToken(sessionToken.access_token, null, sessionToken.instance_url);
-                            that.successCallback.call(that, that.client);
+                            that.successCallback.call(that, that.client, sessionToken);
                         }
                         else
                             console.log('INFO: OAuth login successful!')
@@ -96,80 +96,69 @@
 
         },
 
-        logout:function logout(logoutCallback) {
+        logout: function logout(logoutCallback) {
             var that = this,
+
 
                 refreshToken = encodeURIComponent(this.client.refreshToken),
 
                 doSecurLogout = function () {
+                    var url = that.client.instanceUrl + '/secur/logout.jsp';
                     $.ajax({
-                        type:'GET',
-                        async:that.client.asyncAjax,
-                        url:that.client.instanceUrl + '/secur/logout.jsp',
-                        cache:false,
-                        processData:false,
-                        success:function (data, textStatus, jqXHR) {
-                            if (logoutCallback) logoutCallback.call();
+                        type: 'GET',
+                        async: that.client.asyncAjax,
+                        url: (that.proxyUrl !== null) ? that.proxyUrl : url,
+                        cache: false,
+                        processData: false,
+                        beforeSend: function (xhr) {
+                            if (that.proxyUrl !== null) {
+                                xhr.setRequestHeader('SalesforceProxy-Endpoint', url);
+                            }
                         },
-                        error:function (jqXHR, textStatus, errorThrown) {
+                        success: function (data, textStatus, jqXHR) {
+                            if (logoutCallback) logoutCallback();
+                        },
+                        error: function (jqXHR, textStatus, errorThrown) {
                             console.log('logout error');
-                            if (logoutCallback) logoutCallback.call();
+                            if (logoutCallback) logoutCallback();
                         }
                     });
-                }
+                };
 
-            localStorage.setItem('ftkui_refresh_token', null);
+            console.log('logging out');
+
+            //Remove localstorage item
+            localStorage.removeItem('ftkui_refresh_token');
+
+            var url = this.instanceUrl + '/services/oauth2/revoke';
 
             $.ajax({
-                type:'POST',
-                url:that.client.instanceUrl + '/services/oauth2/revoke',
-                cache:false,
-                processData:false,
-                data:'token=' + refreshToken,
-                success:function (data, textStatus, jqXHR) {
+                type: 'POST',
+                url: (that.proxyUrl !== null) ? that.proxyUrl : url,
+                cache: false,
+                processData: false,
+                data: 'token=' + refreshToken,
+                beforeSend: function (xhr) {
+                    if (that.proxyUrl !== null) {
+                        xhr.setRequestHeader('SalesforceProxy-Endpoint', url);
+                    }
+                },
+                success: function (data, textStatus, jqXHR) {
                     doSecurLogout();
                 },
-                error:function (jqXHR, textStatus, errorThrown) {
+                error: function (jqXHR, textStatus, errorThrown) {
                     doSecurLogout();
                 }
             });
         },
 
-        _authenticate:function _authenticate() {
+        _authenticate: function _authenticate() {
             var that = this;
 
-            if (typeof window.device === 'undefined') { // Most likely app is running in a desktop browser
-
-                var winHeight = 524,
-                    winWidth = 674,
-                    centeredY = window.screenY + (window.outerHeight / 2 - winHeight / 2),
-                    centeredX = window.screenX + (window.outerWidth / 2 - winWidth / 2);
-
-                var loginWindow = window.open(this._getAuthorizeUrl(),
-                    'Login to Salesforce', 'height=' + winHeight + ',width=' + winWidth
-                        + ',toolbar=1,scrollbars=1,status=1,resizable=1,location=0,menuBar=0'
-                        + ',left=' + centeredX + ',top=' + centeredY);
-
-                if (loginWindow) {
-                    // Creating an interval to detect popup window location change event
-                    var interval = setInterval(function () {
-                        if (loginWindow.closed) {
-                            // Clearing interval if popup was closed
-                            clearInterval(interval);
-                        } else {
-                            var loc = loginWindow.location.href;
-                            if (typeof loc !== 'undefined' && loc.indexOf(that.callbackURL) == 0) {
-                                loginWindow.close();
-                                that._sessionCallback(loc);
-                            }
-                        }
-                    }, 250);
-
-                    loginWindow.focus();
-                }
-
+            if (typeof window.device === 'undefined') {// Open authorization url directly in current browser (i.e. no popups)
+                document.location.href = this._getAuthorizeUrl();
             } else if (window.plugins && window.plugins.childBrowser) { // This is PhoneGap/Cordova app
-
+                console.log('_authenticate phoneGap');
                 var childBrowser = window.plugins.childBrowser;
                 childBrowser.onLocationChange = function (loc) {
                     if (loc.indexOf(that.callbackURL) == 0) {
@@ -179,35 +168,79 @@
                     }
                 };
 
-                childBrowser.showWebPage(this._getAuthorizeUrl(), {showLocationBar:true, locationBarAlign:'bottom'});
-
+                childBrowser.showWebPage(this._getAuthorizeUrl(), {showLocationBar: true, locationBarAlign: 'bottom'});
             } else {
                 throw new Error('Didn\'t find way to authenticate!');
             }
         },
 
-        _getAuthorizeUrl:function _getAuthorizeUrl() {
+        _getAuthorizeUrl: function _getAuthorizeUrl() {
             return this.loginURL + 'services/oauth2/authorize?'
                 + '&response_type=token&client_id=' + encodeURIComponent(this.consumerKey)
                 + '&redirect_uri=' + encodeURIComponent(this.callbackURL);
         },
 
-        _sessionCallback:function _sessionCallback(loc) {
+        oauthCallback: function oauthCallback(loc) {
             var oauthResponse = {},
-                fragment = loc.split("#")[1];
+                fragment = loc.split("#")[2];
 
             if (fragment) {
                 var nvps = fragment.split('&');
                 for (var nvp in nvps) {
                     var parts = nvps[nvp].split('=');
-                    oauthResponse[parts[0]] = decodeURIComponent(parts[1]);
+
+                    //Note some of the values like refresh_token might have '=' inside them
+                    //so pop the key(first item in parts) and then join the rest of the parts with =
+                    var key = parts.shift();
+                    var val = parts.join('=');
+                    oauthResponse[key] = decodeURIComponent(val);
                 }
             }
 
             if (typeof oauthResponse.access_token === 'undefined') {
 
                 if (this.errorCallback)
-                    this.errorCallback({code:0, message:'Unauthorized - no OAuth response!'});
+                    this.errorCallback({code: 0, message: 'Unauthorized - no OAuth response!'});
+                else
+                    console.log('ERROR: No OAuth response!')
+
+            } else {
+
+                localStorage.setItem('ftkui_refresh_token', oauthResponse.refresh_token);
+
+                this.client.setRefreshToken(oauthResponse.refresh_token);
+                this.client.setSessionToken(oauthResponse.access_token, null, oauthResponse.instance_url);
+
+                if (this.successCallback)
+                    this.successCallback(this.client, oauthResponse);
+                else
+                    console.log('INFO: OAuth login successful!')
+
+            }
+        },
+
+        _sessionCallback: function _sessionCallback(loc) {
+            var oauthResponse = {},
+                fragment = loc.split("#")[1];
+
+
+            if (fragment) {
+                var nvps = fragment.split('&');
+                for (var nvp in nvps) {
+                    var parts = nvps[nvp].split('=');
+
+                    //Note some of the values like refresh_token might have '=' inside them
+                    //so pop the key(first item in parts) and then join the rest of the parts with =
+                    var key = parts.shift();
+                    var val = parts.join('=');
+                    oauthResponse[key] = decodeURIComponent(val);
+                }
+            }
+
+            if (typeof oauthResponse.access_token === 'undefined') {
+
+                if (this.errorCallback)
+                    this.errorCallback({code: 0, message: 'Unauthorized - no OAuth response!'});
                 else
                     console.log('ERROR: No OAuth response!')
 
@@ -225,9 +258,7 @@
 
             }
         }
-    }
-    ;
+    };
 
     return forcetk;
-}))
-;
+}));
